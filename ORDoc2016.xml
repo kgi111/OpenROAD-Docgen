@@ -1,0 +1,1524 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<OPENROAD xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+	<!-- Copyright (c) 2016 Actian Corporation. All Rights Reserved.-->
+	<APPLICATION name="ORDoc2016">
+		<included_apps>
+			<row>
+				<appname>core</appname>
+				<version>-1</version>
+				<imgfilename>core.plb</imgfilename>
+			</row>
+			<row_class>inclapp</row_class>
+		</included_apps>
+		<procstart>run</procstart>
+		<appflags>-/appflags directory=C:\temp\ORDoc2016 applicationname=unittestframework</appflags>
+	</APPLICATION>
+	<COMPONENT name="DirSeparator" xsi:type="proc4glsource">
+		<script>
+			<![CDATA[procedure DirSeparator=
+{
+    IF CurSession.OperatingSystem = SY_UNIX THEN
+		RETURN '/';
+	ELSE
+		RETURN '\';
+	ENDIF;
+}
+]]>
+		</script>
+		<datatype>varchar(1)</datatype>
+	</COMPONENT>
+	<COMPONENT name="dmt2htmlDoc" xsi:type="proc4glsource">
+		<script>
+			<![CDATA[procedure dmt2htmlDoc(
+	docHome		    = varchar(256) not null;	// Documentation home requires a files subfolder with helper files
+	appName		    = varchar(32) not null;		// Extract documentation for this app. Requires a Documentapp file in docHome
+												// With the name: [appName].dmt
+	CleanXSL		= VARCHAR(256) NOT NULL;	// Cleanup illegal characters
+	HTMLXSL			= VARCHAR(256) NOT NULL;	// Convert XML2HTML
+) =
+DECLARE
+	SubDir			= VARCHAR(256) NOT NULL DEFAULT 'files';
+	readComponenter	= procedure returning varchar(32) not null;
+	Convert2Html	= procedure;	
+	getAttributList	= procedure returning integer not null;
+	readScript		= procedure returning StringObject;
+	readComment		= procedure;
+	readDescription	= procedure;
+	cleanDescription= procedure returning StringObject;
+	readParams		= procedure;	
+	readParamTypes	= procedure;
+	readLink		= procedure returning StringObject;
+	readLinks		= procedure returning StringObject;
+	cleanScript		= procedure returning StringObject;
+	FindRightParens	= procedure returning integer not null;
+	HasMethodParam	= procedure returning integer not null;
+	isMethod		= procedure returning integer not null;
+	nextComment		= procedure returning integer not null;
+	isDocComment	= procedure returning integer not null;
+	removeComment	= procedure returning StringObject;
+	FindMethodName	= procedure returning varchar(100) not null;
+	print			= procedure returning varchar(2000) not null;
+	noNone			= procedure returning varchar(2000) not null;
+	removeLeftSpace	= procedure returning varchar(2000) not null;
+	removeRightSpace= procedure returning StringObject;
+	cleanStr		= procedure returning varchar(2000) not null;
+
+	parseUserClass      = procedure returning varchar(32) not null;
+	parse4glproc 	    = procedure returning varchar(32) not null;
+	parseFrame 	    = procedure returning varchar(32) not null;
+	parseGhostFrame     = procedure returning varchar(32) not null;
+	parseIncludeScript  = procedure returning varchar(32) not null;
+	parseGlobalVariable = procedure returning varchar(32) not null;
+	parseGlobalConstant = procedure returning varchar(32) not null;
+	parse3glproc 	    = procedure returning varchar(32) not null;
+	parseFieldTemplate  = procedure returning varchar(32) not null;
+	parseExternClass    = procedure returning varchar(32) not null;
+
+	getComponentType    = procedure returning varchar(32) not null;
+	getComponentName    = procedure returning varchar(32) not null;
+	getComponentDataType= procedure returning varchar(32) not null;
+	isSystemComponent   = procedure returning integer not null;
+
+	sessionObj	    = SessionObject;
+	DMTFile	    = StringObject;
+	XMLFile	    = StringObject;
+	names		    = array of StringObject;
+	dataTypes	    = array of StringObject;
+
+	ret		    = varchar(32) not null;
+	i		    = integer not null;
+	ii		    = integer not null;
+
+debug	= integer not null default TRUE;
+
+enddeclare
+{
+	DMTFile.FileHandle = docHome + '\' + appName + '.dmt';
+	XMLFile.concatVarchar(text='<?xml version="1.0" encoding="iso-8859-1"?>' + HC_NEWLINE);
+	XMLFile.concatVarchar(text='<application name="' + appName + '">' + HC_NEWLINE);		
+	ret=readComponenter(DMTFile=DMTFile);
+	XMLFile.concatVarchar(text='    <internal>' + HC_NEWLINE);
+	for i = 1 to names.lastRow do
+		for ii = 1 to dataTypes.lastRow do	
+			if lower(names[i].value)=lower(dataTypes[ii].value) then
+				XMLFile.concatVarchar(text='        <intUserClass name="' + dataTypes[ii].value + '"/>' + HC_NEWLINE);
+			endif;
+		endfor;
+	endfor;
+	XMLFile.concatVarchar(text='    </internal>' + HC_NEWLINE);	
+	XMLFile.concatVarchar(text='</application>' + HC_NEWLINE);
+	CallProc Convert2Html();
+}
+
+procedure readComponenter(
+	DMTFile	= StringObject default null;
+)=
+declare
+	i	      = integer not null;
+	type	      = varchar(64) not null;	
+	name	      = varchar(64) not null;	
+	value	      = varchar(100) not null;
+	component     = StringObject;
+	componentName = varchar(100) not null;
+	start	      = integer not null;
+	ret	      = integer not null;
+	DoOnce	      = integer not null;
+	ifSystemComp  = integer not null;
+
+enddeclare
+{
+	start=0;
+	DoOnce=0;
+	for i = 1 to DMTFile.length do
+		value=DMTFile.SubString(i,28);
+		if lower(value)=lower('Application Component Report') or 
+			(i=DMTFile.length) then
+			component=DMTFile.ExtractString(start,i-start);
+			if DoOnce=0 then
+				ret=getAttributList(component=component; indryk='    ');
+				DoOnce=1;
+			endif;
+			type=getComponentType(component=component);
+			name=getComponentName(component=component);
+			if isSystemComponent(component=component)=0 then
+				case type of
+				'User Class' : {									
+					names[names.lastRow+1].value = name;					
+					XMLFile.concatVarchar(text='    <UserClass>' + HC_NEWLINE);
+					componentName = parseUserClass(component=component);
+					XMLFile.concatVarchar(text='    </UserClass>' + HC_NEWLINE);
+				}
+				'4GL Procedure' : { 
+					XMLFile.concatVarchar(text='    <GL4Procedure>' + HC_NEWLINE);
+					componentName = parse4glProc(component=component);			
+					XMLFile.concatVarchar(text='    </GL4Procedure>' + HC_NEWLINE);
+				}
+				'Frame' : {
+					XMLFile.concatVarchar(text='    <Frame>' + HC_NEWLINE);
+					componentName = parseFrame(component=component);			
+					XMLFile.concatVarchar(text='    </Frame>' + HC_NEWLINE);
+				}
+				'Ghost Frame' : {
+					XMLFile.concatVarchar(text='    <GhostFrame>' + HC_NEWLINE);
+					componentName = parseGhostFrame(component=component);
+					XMLFile.concatVarchar(text='    </GhostFrame>' + HC_NEWLINE);
+				}
+				'Include Script' : {
+					if locate(lower(name),'howto')<65 then
+						XMLFile.concatVarchar(text='    <Howto>' + HC_NEWLINE);
+						componentName = parseIncludeScript(component=component);
+						XMLFile.concatVarchar(text='    </Howto>' + HC_NEWLINE);
+					else					
+						XMLFile.concatVarchar(text='    <IncludeScript>' + HC_NEWLINE);
+						componentName = parseIncludeScript(component=component);
+						XMLFile.concatVarchar(text='    </IncludeScript>' + HC_NEWLINE);
+					endif;
+				}
+				'Global Variable' : {
+					XMLFile.concatVarchar(text='    <GlobalVariable>' + HC_NEWLINE);
+					componentName = parseGlobalVariable(component=component);
+					XMLFile.concatVarchar(text='    </GlobalVariable>' + HC_NEWLINE);
+				}
+				'Global Constant' : {
+					XMLFile.concatVarchar(text='    <GlobalConstant>' + HC_NEWLINE);
+					componentName = parseGlobalConstant(component=component);
+					XMLFile.concatVarchar(text='    </GlobalConstant>' + HC_NEWLINE);
+				}	
+				'3GL Procedure' : {
+					XMLFile.concatVarchar(text='    <GL3Procedure>' + HC_NEWLINE);
+					componentName = parse3glProc(component=component);
+					XMLFile.concatVarchar(text='    </GL3Procedure>' + HC_NEWLINE);
+				}
+				'Field Template' : {
+					XMLFile.concatVarchar(text='    <FieldTemplate>' + HC_NEWLINE);
+					componentName = parseFieldTemplate(component=component);
+					XMLFile.concatVarchar(text='    </FieldTemplate>' + HC_NEWLINE);
+				}
+				'' : { //Hvis extern class, så er "Component Type" tom.
+					if name!=appName then
+						XMLFile.concatVarchar(text='    <externClass>' + HC_NEWLINE);
+						componentName = parseExternClass(component=component);
+						XMLFile.concatVarchar(text='    </externClass>' + HC_NEWLINE);
+					endif;
+				}
+				default : { message 'Component Type: ' + type + ' name: ' + name + ' not found';}
+				endcase;
+			endif;
+			start=i;
+		endif;
+	endfor;
+	return '';
+}
+
+procedure Convert2Html()= 
+declare	
+	xmlSource	= msxml!domdocument40;
+	xmlXForm 	= msxml!domdocument40;
+	cleanXMl	= StringObject;
+	htmlFile	= StringObject;	
+	left		= StringObject;
+	right		= StringObject;
+	position	= integer not null;
+	ret		= integer not null;	
+
+enddeclare
+{
+if debug=TRUE then
+ret = XMLFile.WriteToFile(filename = docHome + dirSeparator() +'debug1.xml');	
+endif;
+	ret=xmlSource.loadXML(XMLFile);
+	xmlXForm.load(docHome + dirSeparator() + subDir + dirSeparator() + CleanXSL);	
+	cleanXML = xmlSource.transformNode(xmlXForm);	
+
+//Sætter encoding ind manuelt pga. msxml smider informationen væk.	
+	position=cleanXml.LocateString(match = '?>');
+	if (cleanXML.LocateString(match = 'encoding')=0) or 
+	   (cleanXML.LocateString(match = 'encoding')>position) then
+		left=cleanXML.ExtractString(startposition=0,length=position-1);	
+		right=cleanXML.ExtractString(startposition=position);
+		cleanXML=left;
+		cleanXML.concatVarchar(text=' encoding="iso-8859-1"');
+		cleanXML.concatString(string=right);
+	endif;
+if debug=TRUE then
+ret = cleanXml.WriteToFile(filename = docHome + dirSeparator() + 'debug2.xml');	
+endif;
+	ret=xmlSource.loadXML(cleanXml);	
+	xmlXForm.load(docHome + dirSeparator() + subDir + dirSeparator() + HTMLXSL);	
+	htmlFile= xmlSource.transformNode(xmlXForm);
+	ret = htmlFile.WriteToFile(filename = docHome + dirSeparator() + appName + '.html');
+}
+
+//**** Component methodr
+procedure parseUserClass(
+	component = StringObject default null;
+)= 
+declare
+	position     = integer not null;
+	methodIndex  = integer not null;
+	attrIndex    = integer not null;
+	scriptIndex  = integer not null;
+	ret	     = integer not null;
+	endPos	     = integer not null;
+	attribut     = StringObject;
+	method       = StringObject;
+	script       = StringObject;
+	dataType     = StringObject;
+
+enddeclare
+{
+	dataType.value=getComponentDataType(component=component);
+	dataTypes[dataTypes.lastRow+1] = dataType;
+
+	position=getAttributList(component=component; indryk='        ');	
+
+	attrIndex=component.LocateString(match = 'Component Attributes',ignorecase = 1);
+	methodIndex=component.LocateString(match = 'Component Methods',ignorecase = 1);
+	endPos=methodIndex;
+	scriptIndex=component.LocateString(match = 'Component Method Scripts',ignorecase = 1);
+	if endPos=0 then
+		endPos=scriptIndex;
+	endif;
+	
+	if attrIndex>0 then
+		attribut=component.extractString(startposition=attrIndex+42,length=endPos-(attrIndex+42));
+		XMLFile.concatVarchar(text='        <attributeObjects>'  + HC_NEWLINE);
+		while position>0 do
+			XMLFile.concatVarchar(text='            <attributeObject>'  + HC_NEWLINE);
+			position=getAttributList(component=attribut; indryk='                ');
+			attribut=attribut.extractString(startposition=position+32);		
+			position=getAttributList(component=attribut; indryk='                ');
+			attribut=attribut.extractString(startposition=position);
+			XMLFile.concatVarchar(text='            </attributeObject>'  + HC_NEWLINE);			
+		endwhile;	
+		XMLFile.concatVarchar(text='        </attributeObjects>'  + HC_NEWLINE);
+	endif;
+	if methodIndex>0 then
+		method=component.extractString(startposition=methodIndex+37,length=scriptIndex-(methodIndex+47));	
+		XMLFile.concatVarchar(text='        <methodScripts>' + HC_NEWLINE);
+		position=1;
+		while position>0 do
+			XMLFile.concatVarchar(text='            <methodScript>' + HC_NEWLINE);
+			position=getAttributList(component=method; indryk='                ');
+			method=method.extractString(startposition=position);
+			XMLFile.concatVarchar(text='            </methodScript>' + HC_NEWLINE);
+		endwhile;
+		XMLFile.concatVarchar(text='        </methodScripts>'  + HC_NEWLINE);		
+	endif;
+	if scriptIndex>0 then
+		script=component.extractString(startposition=scriptIndex+53);
+		script=cleanScript(script=script,procMethod='method'); 
+		XMLFile.concatVarchar(text='        <methods>' + HC_NEWLINE);
+		script=readScript(script=script);
+		XMLFile.concatVarchar(text='        </methods>' + HC_NEWLINE);
+	endif;
+	return 'userClass';
+}
+
+procedure parse4glProc(
+	component = StringObject default null;
+)= 
+declare
+	position    = integer not null;
+	scriptIndex = integer not null;
+	script      = StringObject;
+enddeclare
+{
+	position=getAttributList(component=component; indryk='        ');
+	scriptIndex=component.LocateString(match = 'Component Script',ignorecase = 1);	
+	script=component.extractString(startposition=scriptIndex+35);
+	script=cleanScript(script=script,procMethod='procedure');
+	XMLFile.concatVarchar(text='            <methods>' + HC_NEWLINE);
+	script=readScript(script=script);
+	XMLFile.concatVarchar(text='            </methods>' + HC_NEWLINE);
+	return 'parse4glProc';
+}
+
+procedure parseFrame(
+	component = StringObject default null;
+)= 
+declare
+	position    = integer not null;
+	scriptIndex = integer not null;
+	script      = StringObject;
+enddeclare
+{
+	position=getAttributList(component=component; indryk='        ');
+	scriptIndex=component.LocateString(match = 'Component Script',ignorecase = 1);	
+	script=component.extractString(startposition=scriptIndex+35);
+	script=cleanScript(script=script,procMethod='procedure');
+	XMLFile.concatVarchar(text='            <methods>' + HC_NEWLINE);
+	script=readScript(script=script);
+	XMLFile.concatVarchar(text='            </methods>' + HC_NEWLINE);
+	return 'parseFrame';
+}
+
+procedure parseGhostFrame(
+	component = StringObject default null;
+)= 
+declare
+	position    = integer not null;
+	scriptIndex = integer not null;
+	script      = StringObject;
+enddeclare
+{
+	position=getAttributList(component=component; indryk='        ');
+	scriptIndex=component.LocateString(match = 'Component Script',ignorecase = 1);	
+	script=component.extractString(startposition=scriptIndex+35);
+	script=cleanScript(script=script,procMethod='method');
+	XMLFile.concatVarchar(text='            <methods>' + HC_NEWLINE);
+	script=readScript(script=script);
+	XMLFile.concatVarchar(text='            </methods>' + HC_NEWLINE);
+	return 'parseFrame';
+}
+
+procedure parseIncludeScript(
+	component = StringObject default null;
+)= 
+declare
+	position     = integer not null;
+	scriptIndex  = integer not null;
+	commentStart = integer not null;
+	commentSlut  = integer not null;
+	internal     = integer not null;
+	script       = StringObject;
+	description  = StringObject;
+enddeclare
+{	
+	position=getAttributList(component=component; indryk='        ');
+	scriptIndex=component.LocateString(match = 'Include Script',startPosition=position,ignorecase = 1);
+	script=component.extractString(startposition=scriptIndex+43);
+	commentStart=script.LocateString(match = '/**',ignorecase = 1);
+	if commentStart>0 then
+		commentSlut=script.LocateString(match = '*/',startPosition=commentStart+3,ignorecase = 1);
+		description=script.extractString(startposition=commentStart+3,length=commentSlut-(commentStart+3));
+		internal=description.LocateString(match = '@internal',ignorecase = 1);	
+		if internal>0 then
+			XMLFile.concatVarchar(text='        <internal internal="true"/>' + HC_NEWLINE);
+			description=description.extractString(startposition=internal+9);
+		endif;
+		callProc readDescription(description=description,space='        ');
+	endif;
+	return 'parseIncludeScript';
+}
+
+procedure parseGlobalVariable(
+	component = StringObject default null;
+)= 
+declare
+	position  = integer not null;
+enddeclare
+{
+	position=getAttributList(component=component; indryk='        ');
+}
+
+procedure parseGlobalConstant(
+	component = StringObject default null;
+)= 
+declare
+	position    = integer not null;
+enddeclare
+{
+	position=getAttributList(component=component; indryk='        ');
+}
+
+procedure parse3glproc(
+	component = StringObject default null;
+)= 
+declare
+	position    = integer not null;
+enddeclare
+{
+	position=getAttributList(component=component; indryk='        ');
+}
+
+procedure parseFieldTemplate(
+	component = StringObject default null;
+)= 
+declare
+	position    = integer not null;
+	scriptIndex = integer not null;
+	script      = StringObject;
+enddeclare
+{
+	position=getAttributList(component=component; indryk='        ');
+	component=component.extractString(startposition=position);
+	position=getAttributList(component=component; indryk='        ');
+	scriptIndex=component.LocateString(match = 'Fieldobject Script',ignorecase = 1);	
+	script=component.extractString(startposition=scriptIndex+37);
+	script=cleanScript(script=script,procMethod='procedure');
+	XMLFile.concatVarchar(text='            <methods>' + HC_NEWLINE);
+	script=readScript(script=script);
+	XMLFile.concatVarchar(text='            </methods>' + HC_NEWLINE);
+	return 'FieldTemplate';
+}
+
+procedure parseExternClass(
+	component = StringObject default null;
+)= 
+declare
+	position    = integer not null;
+enddeclare
+{
+	position=getAttributList(component=component; indryk='        ');
+}
+
+//**** Helper procedure
+procedure getAttributList(
+	component     = StringObject default null;
+	indryk	      = varchar(64) not null;
+)=
+declare
+	start        = integer not null;
+	Stop         = integer not null;
+	position     = integer not null;	
+	position1    = integer not null;
+	position2    = integer not null;
+	linie	     = integer not null;
+	attributList = StringObject;
+	line         = StringObject;
+	attributName = StringObject;
+	value        = StringObject;
+	tmpLine	     = StringObject;
+	ch	     = varchar(100);
+
+enddeclare
+{
+	start = component.LocateString(match = HC_NEWLINE + HC_NEWLINE, startposition = 0, ignorecase = 1)+2;
+	stop = component.LocateString(match = HC_NEWLINE + HC_NEWLINE, startposition = start, ignorecase = 1);
+	attributList = component.ExtractString(startposition = start , length = stop-start);
+	position=1;
+	linie=1;
+	while (position>0) do
+		position2 = attributList.LocateString(match = HC_NEWLINE, ignorecase = 1);		
+		line=attributList.extractString(startposition=0,length=position2-1);
+		position1=line.LocateString(match = ':',ignorecase = 1);		
+		if position1=0 then
+			position1=line.LocateString(match = '   ',ignorecase = 1);
+		endif;		
+		position=position2;	
+		line=attributList.extractString(startposition=0,length=position-1);
+		ch=line.SubString(1,1);
+//If there is a tab tehn it is part of an attribute
+//else it is part of a remark field
+		if not (ch=HC_TAB) then 
+			position1=0;
+		endif;
+		
+		if position1>0 then
+			attributName=line.extractString(startposition=0,length=position1-1);
+		endif;		
+		value=line.extractString(startposition=position1+1);
+		attributList = attributList.ExtractString(startposition = position+1);		
+		if (lower(squeeze(attributName.value))=lower('Remark')) then	
+			if linie=1 then
+				XMLFile.concatVarchar(text=indryk + '<attrs name="' + noNone(vc=attributName.value) + '">' + HC_NEWLINE);	
+			endif;
+			XMLFile.concatVarchar(text=indryk + '    <attr line="' + varchar(linie) + '">' + HC_NEWLINE);
+			tmpLine=readLink(line=value,linkType='@link');
+			if tmpLine is not null then
+				value=tmpLine;
+			endif;
+			XMLFile.concatVarchar(text=print(vc=value.value) + HC_NEWLINE);
+			XMLFile.concatVarchar(text=indryk + '    </attr>' + HC_NEWLINE);			
+			linie=linie+1;
+		else	
+			if linie>1 then
+				XMLFile.concatVarchar(text=indryk + '</attrs>' + HC_NEWLINE);				
+			endif;
+			XMLFile.concatVarchar(text=indryk + '<attr name="' + removeLeftSpace(vc=noNone(vc=squeeze(attributName.value))) + '"');
+			XMLFile.concatVarchar(text=' value="' + removeLeftSpace(vc=noNone(vc=value.value)) + '" lowerValue="' + squeeze(lower(noNone(vc=value.value))));
+			XMLFile.concatVarchar(text='"/>' + HC_NEWLINE);
+			linie=1;
+		endif;
+	endwhile;
+	return Stop;
+}
+
+procedure getComponentType(
+	component     = StringObject default null;
+)= 
+declare
+	componentType = varchar(32) not null;
+	position      = integer not null;
+	value         = varchar(100) not null;
+	i	      = integer not null;
+enddeclare
+{
+	position = component.LocateString(match = 'Component Type:', startposition = 0,ignorecase = 1)+15;
+	if position>15 then
+		for i=position to component.length do
+			value=component.SubString(i,1);
+			if value=HC_NEWLINE then	
+				componentType=squeeze(component.SubString(position,i-position));
+				return componentType;
+			endif;
+		endfor;	
+	endif;
+	return '';	
+}
+
+procedure getComponentName(
+	component     = StringObject default null;
+)= 
+declare
+	componentName = varchar(32) not null;
+	position      = integer not null;
+	value         = varchar(100) not null;
+	i	      = integer not null;
+enddeclare
+{
+	position = component.LocateString(match = 'Name:', startposition = 0,ignorecase = 1)+12;
+	if position>15 then
+		for i=position to component.length do
+			value=component.SubString(i,1);
+			if value=HC_NEWLINE then	
+				componentName=squeeze(component.SubString(position,i-position));
+				return componentName;
+			endif;
+		endfor;	
+	endif;
+	return '';	
+}
+
+procedure getComponentDataType(
+	component     = StringObject default null;
+)= 
+declare
+	DataType      = varchar(32) not null;
+	position      = integer not null;
+	value         = varchar(100) not null;
+	i	      = integer not null;
+enddeclare
+{
+	position = component.LocateString(match = 'Datatype:', startposition = 0,ignorecase = 1)+15;
+	if position>15 then
+		for i=position to component.length do
+			value=component.SubString(i,1);
+			if value=HC_NEWLINE then	
+				DataType=squeeze(component.SubString(position,i-position));
+				return DataType;
+			endif;
+		endfor;	
+	endif;
+	return '';	
+}
+
+procedure isSystemComponent(
+	component     = StringObject default null;
+)= 
+declare
+	componentType = varchar(32) not null;
+	position      = integer not null;
+	value         = varchar(100) not null;
+	i	      = integer not null;
+enddeclare
+{
+	position = component.LocateString(match = 'Short Remark (Obj):', startposition = 0,ignorecase = 1)+15;
+	if position>15 then
+		for i=position to component.length do
+			value=component.SubString(i,1);
+			if value=HC_NEWLINE then	
+				componentType=squeeze(component.SubString(position,i-position));
+				endloop;
+			endif;
+		endfor;	
+	endif;
+	position = Locate(componentType,'NOT VIEWABLE');
+	if size(componentType)+1=position then
+		position=0;
+	endif;
+	return position;
+}
+
+//**** Læser hvad cleanScript proceduren har generedert.
+procedure readScript(
+	script       		 = StringObject default null;
+)=
+	declare
+		comment       	 = StringObject default null;
+		paramTypes	 = StringObject default null;
+		methodParameter = StringObject default null;
+		methodname   	 = varchar(100) not null;
+		start	         = integer not null;
+		stop	         = integer not null;
+		internal         = integer not null;
+		newLine          = integer not null;
+		spacePosition	 = integer not null;
+		left 		 = StringObject;
+	enddeclare
+{
+	start=1;
+	while script.length>0 do
+		Stop = script.LocateString(match = '*/',startposition=start, ignorecase = 1);
+		if stop=0 then
+		//	In case a Comment starts with /** without an */
+			endloop;
+		endif;
+		comment=script.extractString(startposition=1,length=stop+1);
+		
+		start = script.LocateString(match = '/**',startposition=stop, ignorecase = 1);
+		methodParameter=script.extractString(startposition=Stop+2,length=start-(stop+2));
+		spacePosition = methodParameter.LocateString(match = ' ',startposition=0, ignorecase = 1);
+		
+		methodname=methodParameter.subString(1,spacePosition);
+		if methodname='initializeInitialize' then
+			methodname='';
+		endif;		
+
+		paramTypes=methodParameter.extractString(startposition=spacePosition);
+		stop=start;
+		if stop=0 then
+			stop=script.length+1;
+		endif;
+		script=script.extractString(startposition=stop);
+		start=1;
+		
+		internal=comment.LocateString(match = '@internal', ignorecase = 1);		
+		if internal>0 then
+			XMLFile.concatVarchar(text='            <method name="' + noNone(vc=methodname) + '" lowerName="' + squeeze(lower(noNone(vc=methodname))) + '" internal="true">' + HC_NEWLINE);
+			newLine=comment.LocateString(match = HC_NEWLINE,startposition=internal, ignorecase = 1);
+			comment=comment.extractString(startposition=newLine+1,length=stop+1);
+			left.value='/**' + HC_NEWLINE;
+			comment=left.concatString(string=comment);
+		else
+			XMLFile.concatVarchar(text='            <method name="' + noNone(vc=methodname) + '" lowerName="' + squeeze(lower(noNone(vc=methodname))) + '">' + HC_NEWLINE);
+		endif;
+		callproc readComment(comment=comment);	
+		if length(trim(squeeze(paramTypes.value)))>3 then
+			XMLFile.concatVarchar(text='                <paramTypes name="' + squeeze(noNone(vc=methodname)) + '">' + HC_NEWLINE);
+			callproc readParamTypes(paramTypes=paramTypes);	
+			XMLFile.concatVarchar(text='                </paramTypes>' + HC_NEWLINE);
+		endif;
+		XMLFile.concatVarchar(text='            </method>' + HC_NEWLINE);		
+	endwhile;
+	return script;	
+}
+
+//**** Remove everything that is out of interest (hopefully :-)
+procedure cleanScript(
+	script       	= StringObject default null;
+	procMethod   	= varchar(9) not null;
+)= 
+declare
+	returnScript    = StringObject;
+	comment		= StringObject;
+	inputParameter	= StringObject;
+	commentStart    = integer not null;
+	commentStop     = integer not null;
+	initializePos	= integer not null;
+	procMethodPos	= integer not null;
+	methodNamePos   = integer not null;
+	LeftParens    = integer not null;
+	RightParens   = integer not null;
+	i		= integer not null;
+	vc 	 	= varchar(10) not null;
+	methodName     = varchar(100) not null;
+	pm		= varchar(10) not null;	
+enddeclare
+{
+	commentStart=nextComment(script=script);
+	while commentStart>0 do
+		commentStop = script.LocateString(match = '*/',startPosition=commentStart, ignorecase = 1);
+		comment=script.extractString(startposition=commentStart,length=commentStop-(commentStart-2));
+
+		returnScript=returnScript.concatString(string=comment);
+		script=script.extractString(startposition=commentStop+2);
+		initializePos=script.LocateString(match = 'initialize', ignorecase = 1);
+		IF initializePos = 0 THEN
+			initializePos=script.LocateString(match = 'initialise', ignorecase = 1);
+        ENDIF; 
+		procMethodPos=script.LocateString(match = procMethod, ignorecase = 1);
+		if initializePos=0 then
+			initializePos=script.length;
+		endif;
+		if procMethodPos=0 then
+			procMethodPos=script.length;
+		endif;
+		if initializePos>procMethodPos then
+			script=script.extractString(startposition=procMethodPos);
+			methodName=FindMethodName(so=script);			
+			returnScript=returnScript.concatVarchar(text=methodName + ' ');
+		else
+			script=script.extractString(startposition=initializePos);
+			methodName='initialize';			
+			returnScript=returnScript.concatVarchar(text='initializeInitialize ');
+		endif;		
+		methodNamePos=script.LocateString(match = methodName, ignorecase = 1);
+		script=script.extractString(startposition=methodNamePos+length(methodName));	
+		LeftParens=HasMethodParam(string=script);		
+		if LeftParens>0 then
+			script=script.extractString(startposition=LeftParens);		
+			LeftParens=0;
+			RightParens=FindRightParens(string=script);
+			inputParameter=script.extractString(length=RightParens);
+			returnScript=returnScript.concatString(string=inputParameter);
+			script=script.extractString(startposition=RightParens+1);
+		endif;	
+		commentStart=nextComment(script=script);		
+	endwhile;
+	return returnScript;
+}
+
+procedure FindRightParens(
+// **** string skal starte med en venstre parantes.
+	string		= StringObject default null;
+)= 
+declare
+	i	        = integer not null;
+	parens  	= integer not null;
+	ch              = varchar(1) not null;
+enddeclare
+{
+	i=1;
+	parens=0;
+	while i<string.length do
+		ch=string.subString(i,1);
+		if ch='(' then parens=parens+1; endif;
+		if ch=')' then parens=parens-1; endif;
+		if parens=0 then		
+			endloop;				
+		endif;
+		i=i+1;
+	endwhile;
+	return i;
+}
+
+
+procedure HasMethodParam( 
+	string		= StringObject default null;
+)= 
+declare
+	i	        = integer not null;
+	ch              = varchar(1) not null;
+enddeclare
+{
+	i=1;
+	while i<string.length do	
+		ch=string.SubString(i,1);		
+		if ch='=' then
+			return 0;
+		endif;
+		if ch='(' then
+			return i;
+		endif;
+		i=i+1;
+	endwhile;	
+}
+
+procedure isMethod(
+	script		= StringObject default null;
+ 	position	= integer not null;
+	procMethod      = varchar(9);
+)= 
+declare
+	ch	        = varchar(1) not null;
+enddeclare
+{
+	ch=script.SubString(position-1,1);
+	if not((ch=' ') or (ch=HC_NEWLINE) or (ch=HC_TAB)) then
+		return -1;
+	endif;
+			
+	ch=script.SubString(position+length(procMethod),1);
+	if not((ch=' ') or (ch=HC_NEWLINE)) then
+		return -1;
+	endif;	
+	return 0;
+}
+
+procedure removeComment(
+	script		= StringObject default null;
+ 	position	= integer not null;
+)= 
+declare
+	vc	        = varchar(2) not null;
+enddeclare
+{
+	vc=script.SubString(position,2);
+	if vc='/*' then
+		position = script.LocateString(match = '*/',startposition=position, ignorecase = 1);			
+		script=script.extractString(startposition=position+2);
+		position=0;
+	endif;
+	vc=script.SubString(position,1);
+	if vc='{' then
+		position = script.LocateString(match = '}',startposition=position, ignorecase = 1);			
+		script=script.extractString(startposition=position+2);
+	endif;
+	return script;
+}
+
+procedure FindMethodName(
+	so		= StringObject default null;	
+)= 
+declare
+	ch	        = varchar(2) not null;
+	i		   	= integer not null default 1;
+	found		= integer not null default false;
+	start		= integer not null;
+enddeclare
+{	
+	while i<so.length do
+		ch=so.SubString(i,1);	
+		if (ch=' ' or ch=HC_NEWLINE or ch=HC_TAB) and (found=FALSE) then	
+			found=TRUE;									
+		endif;
+		if (ch!=' ' and ch!=HC_NEWLINE and ch!=HC_TAB) and (found=TRUE) then
+			endloop;
+		endif;
+		i=i+1;
+	endwhile;
+	start=i;
+	while i<so.length do
+		ch=so.SubString(i,1);	
+		if ch='=' or ch='(' or ch=' ' or ch=HC_NEWLINE or ch=HC_TAB then			
+			endloop;				
+		endif;
+		i=i+1;
+	endwhile;
+
+	return squeeze(so.SubString(start,i-start));
+}
+
+//**** Read comments starting with /**
+procedure readComment(
+	comment 	= StringObject default null;
+)=
+declare
+	pos		= integer not null;
+	idx		= integer not null default 0;
+	aParam		= integer not null default 0;
+	smallest	= integer not null;
+	command		= integer not null;
+	nextCommand	= StringObject default null;
+	params		= Array of StringObject;
+	commands	= Array of StringObject;
+enddeclare
+{
+	commands[commands.lastrow+1].value='@param';
+	commands[commands.lastrow+1].value='@throws';
+	commands[commands.lastrow+1].value='@see';
+	commands[commands.lastrow+1].value='@return';
+	commands[commands.lastrow+1].value='*/'; // must be last in the array
+	command=0;
+	for idx=1 to commands.lastrow do
+		params[idx].value='';
+	endfor;
+	idx=0;	
+	while command<comment.length do
+		pos=command;
+		smallest = comment.length;
+		for idx=1 to commands.lastrow do
+			command=comment.LocateString(match = commands[idx].value,startPosition=pos+1, ignorecase = 1);
+			if command < smallest and command > 0 then //command < smallest ensures that we get the next
+				smallest = command;
+			endif;
+		endfor;
+		command = smallest;
+		nextCommand=comment.extractString(startposition=pos,length=command-pos);
+		for aParam=1 to commands.lastrow do
+			if nextCommand.LocateString(match = commands[aParam].value, ignorecase = 1)>0 then
+				endloop;
+			endif;
+		endfor;
+		if aParam=commands.lastrow+1 then aParam=commands.lastrow; endif;
+		params[aParam]=params[aParam].concatString(string=nextCommand);
+	endwhile;
+	for idx=1 to params.lastrow do
+		if params[idx].value!='' then
+			case idx of
+				1 : { //@param
+					XMLFile.concatVarchar(text='                <inputParams>' + HC_NEWLINE);				
+					callProc readParams(parameter=params[idx],paramType='@param',xml='inputParam');
+					XMLFile.concatVarchar(text='                </inputParams>' + HC_NEWLINE);
+				}
+				2 : { //@throws
+					XMLFile.concatVarchar(text='                <throws>' + HC_NEWLINE);
+					callProc readParams(parameter=params[idx],paramType='@throws',xml='throw');
+					XMLFile.concatVarchar(text='                </throws>' + HC_NEWLINE);
+				}
+				3 : { //@see
+					XMLFile.concatVarchar(text='                <seeAlsos>' + HC_NEWLINE);					
+					callProc readlinks(parameter=params[idx]);
+					XMLFile.concatVarchar(text='                </seeAlsos>' + HC_NEWLINE);
+				}
+				4 : { //@return
+					params[idx]=params[idx].extractString(startposition=9);
+					XMLFile.concatVarchar(text='                <return>' + HC_NEWLINE);
+					callProc readDescription(description=params[idx],space='                 ');
+					XMLFile.concatVarchar(text='                </return>' + HC_NEWLINE);
+				}
+				5 : { //@description
+					params[idx]=params[idx].extractString(startposition=4,length=params[idx].length-8);
+					callproc readDescription(description=params[idx],space='                ');
+				}
+			endcase;
+		endif;
+	endfor;
+}
+
+procedure readDescription(
+	description 	= StringObject default null;
+	space		= varchar(100) not null;
+)=
+declare
+	endOfLine	= integer not null;
+	line#		= integer not null;
+	line	 	= StringObject default null;
+	tmpLine	 	= StringObject default null;
+enddeclare
+{
+	description=cleanDescription(description=description);
+	while description.length>0 do
+		endOfLine = description.LocateString(match = HC_NEWLINE, ignorecase = 1);
+		line=description.extractString(length=endOfline-1);
+		if endOfLine=0 then
+			endOfLine=description.length;
+		endif;
+		description=description.extractString(startPosition=endOfline+1);
+  		tmpLine=readLink(line=line,linkType='@link');
+		if tmpLine is not null then
+			line=tmpLine;
+		endif;
+		line# = line# + 1;
+		XMLFile.concatVarchar(text=space + '<description line="' + varchar(line#) + '">' + HC_NEWLINE);
+		XMLFile.concatVarchar(text=print(vc=line.value) + HC_NEWLINE);
+		XMLFile.concatVarchar(text=space +'</description>' + HC_NEWLINE);
+	endwhile;
+}
+
+procedure cleanDescription(
+	description 	= StringObject default null;
+)=
+declare
+	sol		= integer not null;
+	nl		= integer not null;
+	times	= integer not null;
+	start	= StringObject default null;
+	stop	= StringObject default null;
+	ch		= varchar(1) not null;
+enddeclare
+{
+	nl = description.LocateString(match = HC_NEWLINE,startPosition=0, ignorecase = 1);
+	while nl > 0 do		
+		start=description.extractString(length=nl-1);
+		ch=description.subString(startPosition=nl-1,length=1);
+		if ch='>' then
+			ch=description.subString(startPosition=nl,length=1);
+			if ch=HC_NEWLINE then			
+				stop = description.extractString(startPosition=nl+1);
+				description = start.concatString(string=stop);	
+				sol=nl;
+			endif;
+		else		
+			sol=nl+1;
+		endif;
+
+//** cutting the 2 tabs at the start of the line
+		start = description.extractString(length=sol-1);
+		stop  = description.extractString(startPosition=sol+2);
+		description=start.concatString(string=stop);
+		start=description.extractString(length=sol-1);
+		times=FALSE;
+		while sol < description.length do
+			ch = description.subString(startPosition=sol,length=1);
+			if ch != ' ' and ch != '*' and ch != HC_TAB and ch != HC_NEWLINE then 	
+				endLoop; 
+			endif;		
+			if ch = '*' then
+				times = TRUE;
+				ch=description.subString(startPosition=sol+1,length=1);
+				if ch=' ' then
+					sol=sol+2;					
+					endloop;				
+				endif;												
+			endif;		
+			sol=sol+1;			
+		endWhile;
+		if times=TRUE then
+			stop=description.extractString(startPosition=sol);
+			description=start.concatString(string=stop);
+		endif;
+		nl = description.LocateString(match = HC_NEWLINE,startPosition=nl+1, ignorecase = 1);
+	endwhile;
+	description=description.concatVarchar(text=HC_NEWLINE);
+	return description;
+}
+
+procedure readLink(
+	line 	 = StringObject default null;
+	linkType = varchar(12) not null;
+)=
+declare
+		see		= integer not null;
+		spacePos	= integer not null;
+		tab		= integer not null;
+		Bang	= integer not null;
+		DotPos	= integer not null;
+		eolink		= integer not null;
+		url		= integer not null;
+		dblQts	= integer not null;
+		fileName	= varchar(100) not null;
+		name		= varchar(100) not null;
+		className	= varchar(100) not null;		
+		methodName	= varchar(100) not null;
+		address		= varchar(200) not null;
+		text		= varchar(200) not null;
+		ch		= varchar(1);		
+		htmlCode	= StringObject;		
+		_left		= StringObject;
+		_right		= StringObject;
+enddeclare
+{
+	see = line.LocateString(match = linkType, ignorecase = 1);
+	if see > 0 then
+		line = removeRightSpace(string=line);
+		if lower(linkType) = '@link' then
+			eolink=line.LocateString(match = '}', ignorecase = 1);			
+			_left=line.extractString(length=see-2);
+			_right=line.extractString(startPosition=eolink+1);
+			line=line.extractString(startPosition=see,length=(eolink-see));
+			see=1;
+		endif;
+		url=line.LocateString(match = '<a', ignorecase = 1);
+		DblQts=line.LocateString(match = '"', ignorecase = 1);
+		if DblQts > url then 
+			DblQts = 0;
+		endif;
+		if url=0 and dblQts = 0 then
+// **** Find description. <a href=...>description</a>			
+			spacePos=length(linkType)+1;
+			while spacePos<line.length do			
+				ch=line.subString(startposition=spacePos,length=1);
+				if ch!=' ' and ch!=HC_TAB then
+					endloop;
+				endif;
+				spacePos=spacePos+1;			
+			endwhile;
+			tab=line.LocateString(match = HC_TAB,startPosition=see+spacePos+1, ignorecase = 1);
+			spacePos=line.LocateString(match = ' ',startPosition=see+spacePos+1, ignorecase = 1);		
+			if (tab<spacePos) and (tab>0) then
+				spacePos=tab;
+			endif;
+			if spacePos=0 then
+				spacePos=length(linkType)+1;
+			endif;
+			name=line.subString(startposition=spacePos);				
+			line=line.extractString(startPosition=length(linkType)+1,length=spacePos-(length(linkType)+1));
+			htmlCode.value='<a href="';					
+
+			bang=line.LocateString(match = '!', ignorecase = 1);		
+			if bang > 0 then
+				fileName=line.subString(length=Bang-1);
+			else
+				fileName=appName;
+			endif;
+			line=line.extractString(startPosition = bang+1);
+			dotPos = line.LocateString(match = '.', ignorecase = 1);
+			className=line.subString(length=dotPos);
+			line=line.extractString(startPosition=dotPos+1);
+			methodName=line.value;
+			if squeeze(className)='' and squeeze(methodName)='' then
+				methodName=name;
+			endif;
+			
+			htmlCode = htmlCode.ConcatVarchar(text = squeeze(fileName) + '.html');
+			htmlCode = htmlCode.ConcatVarchar(text = '#');
+			htmlCode = htmlCode.ConcatVarchar(text = squeeze(lower(className)));
+			htmlCode = htmlCode.ConcatVarchar(text = squeeze(lower(methodName)) + '">');
+			htmlCode = htmlCode.ConcatVarchar(text = squeeze(name) + '</a>');
+		elseif dblQts = 0 then
+			if locate(squeeze(lower(name)),'url:') < 101 then
+				name=right(name,length(name)-(locate(lower(name),'url:')+3));
+			endif;
+			address = line.subString(startPosition=url);
+			htmlCode = htmlCode.ConcatVarchar(text = address);
+		elseif dblQts > 0 then
+			text=line.subString(startPosition=dblQts+1,length=line.length-(dblQts+1));			
+			if lower(linkType)='@link' then
+				htmlCode = htmlCode.ConcatVarchar(text = '"' + text + '"');
+			else
+				htmlCode = htmlCode.ConcatVarchar(text = '<a href=''''>' + text + '</a>');
+			endif;
+		endif;
+		line.value='';
+		line=line.ConcatString(string = _left);
+		line=line.ConcatString(string = htmlCode);
+		line=line.ConcatString(string = _right);
+		return line;
+	endif;
+	return null;
+}
+
+procedure readLinks(
+	parameter	= StringObject default null;
+)=
+declare
+	idx		= integer not null default 0;
+	nextIdx		= integer not null default 1;
+	space		= integer not null;
+	line		= StringObject;
+enddeclare
+{
+	while nextIdx>0 do
+		idx=parameter.LocateString(match = '@see',startPosition=idx+1, ignorecase = 1);
+		nextIdx=parameter.LocateString(match = '@see',startPosition=idx+1, ignorecase = 1);
+		line=parameter.extractString(startposition=idx,length=nextIdx-(idx+6));	
+		XMLFile.concatVarchar(text=readLink(line=line,linkType='@see').value + HC_NEWLINE);		
+	endwhile;
+}
+
+procedure readParams(
+	parameter	= StringObject default null;
+	paramType	= varchar(12) not null;
+	xml		= varchar(100) not null;
+)=
+declare
+	idx		= integer not null default 0;
+	nextIdx		= integer not null default 1;
+	name		= varchar(100) not null;
+	ch		= varchar(1) not null;
+	space		= integer not null;
+	tab		= integer not null;
+	description	= StringObject default null;
+enddeclare
+{
+	parameter=cleanDescription(description=parameter);
+	parameter=removeRightSpace(string=parameter);
+	while nextIdx>0 do
+		idx=parameter.LocateString(match = paramType,startPosition=idx+1, ignorecase = 1);
+		nextIdx=parameter.LocateString(match = paramType,startPosition=idx+1, ignorecase = 1);
+		space=idx+length(paramType);
+		while space<parameter.length do			
+			ch=parameter.subString(startposition=space,length=1);
+			if ch!=' ' and ch!=HC_TAB then
+				endloop;
+			endif;
+			space=space+1;			
+		endwhile;		
+		tab=parameter.LocateString(match = HC_TAB,startPosition=space, ignorecase = 1);
+		space=parameter.LocateString(match = ' ',startPosition=space, ignorecase = 1);		
+		if (tab<space) and (tab>0) then
+			space=tab;
+		endif;
+		name=parameter.subString(startposition=idx+length(paramtype)+1,length=space-(idx+length(paramtype)+1));
+		description=parameter.extractString(startposition=space+1,length=nextIdx-(space+1));
+		description=removeRightSpace(string=description);
+		XMLFile.concatVarchar(text='                    <' + xml + ' name="' + name + '" lowerValue="' + lower(squeeze(name)) + '">' + HC_NEWLINE);
+		callProc readDescription(description=description,space='                        ');
+		XMLFile.concatVarchar(text='                    </' + xml + '>' + HC_NEWLINE);	
+	endwhile;
+}
+
+Procedure ReadParamTypes(
+	ParamTypes 	= StringObject default null;	
+)=
+declare
+	stop		= integer not null;
+	isequalPos     = integer not null;
+	semicolon       = integer not null;
+	line	 	= StringObject default null;
+	varName		= varchar(100) not null;
+	type		= varchar(100) not null;
+enddeclare
+{
+	stop = paramTypes.LocateString(match = ';',startPosition=0, ignorecase = 1);
+	stop = paramTypes.LocateString(match = HC_NEWLINE,startPosition=stop, ignorecase = 1);
+	if stop=0 then
+		stop = paramTypes.LocateString(match = ')',startPosition=stop, ignorecase = 1);
+	endif;
+	while stop>0 do
+		line=paramTypes.extractString(length=stop);
+		paramTypes=paramTypes.extractString(startPosition=stop+1);
+		isEqualPos=line.LocateString(match = '=',startPosition=0, ignorecase = 1);
+		varName = line.subString(3 , isEqualPos-3);
+		semicolon=line.LocateString(match = ';',startPosition=0, ignorecase = 1);
+		type=line.subString(isEqualPos+1,semicolon-(isEqualPos+1));
+		if not (print(vc=type)='') and not (noNone(vc=varName)='') then
+			XMLFile.concatVarchar(text='                    <param name="' + lower(squeeze(noNone(vc=varName))) + '">' + HC_NEWLINE);
+			XMLFile.concatVarchar(text=print(vc=type) + HC_NEWLINE);
+			XMLFile.concatVarchar(text='                    </param>' + HC_NEWLINE);
+		endif;
+		stop = paramTypes.LocateString(match = HC_NEWLINE,startPosition=0, ignorecase = 1);
+	endwhile;
+}
+
+procedure nextComment(
+	script 	= StringObject default null;
+)=
+declare
+	commentStart	= integer not null;
+	commentStop	= integer not null;
+	okComment	= integer not null;
+enddeclare
+{
+	commentStart=-3;
+	okComment=FALSE;
+	while okComment=FALSE do
+		commentStart = script.LocateString(match = '/**',startPosition=commentStart+3, ignorecase = 1);
+		commentStop  = script.LocateString(match = '*/' ,startPosition=commentStart  , ignorecase = 1);
+		okComment=TRUE;
+		if commentStart=0 then
+			okComment=FALSE;
+			endloop;
+		endif;
+		if commentStart>1 then
+			if script.subString(startPosition=commentStart-1,length=2)='//' then
+				okComment=FALSE;
+			endif;
+		endif;
+		if commentStart>0 then
+			if script.subString(startPosition=commentStart,length=4)='/***' then
+				okComment=FALSE;		
+			endif;	
+		endif;
+		if okComment=TRUE then
+			if isDocComment(startPosition=commentStop+2,script=script)=FALSE then
+				okComment=FALSE;
+			endif;
+		endif;
+		script=script.extractString(startposition=commentStop+2);
+	endwhile;
+	return commentStart;
+}
+
+procedure isDocComment(
+	startPosition	= integer not null;
+	script		= StringObject default null;
+)=
+declare
+	i	= integer not null;
+	pm	= varchar(10) not null;
+enddeclare
+{
+	i=startPosition;
+	while i<script.length do
+		pm=script.subString(i,1);
+		if (pm!=' ' and pm!=HC_NEWLINE and pm!=HC_TAB) then
+			pm=script.subString(i,10);
+			if upper(pm)='INITIALIZE' or upper(pm)='INITIALISE' then
+				return TRUE;
+			endif;
+			pm=script.subString(i,9);
+			if upper(pm)='PROCEDURE' then
+				return TRUE;
+			endif;
+			pm=script.subString(i,6);
+			if upper(pm)='METHOD' then
+				return TRUE;
+			endif;	
+			return FALSE;
+		endif;
+		i=i+1;
+	endwhile;
+	return FALSE;
+}
+
+
+procedure print(
+	vc = varchar(2000) not null;
+)=
+{
+	return '<![CDATA[' + vc + ']]]]><![CDATA[>';
+}
+
+procedure noNone(
+	vc = varchar(2000) not null;
+)=
+{	
+	vc=cleanStr(vc=vc);
+	if locate(lower(vc),'<none>')<2001 then
+		vc='';
+	endif;
+	if locate(lower(vc),'<undefined>')<2001 then
+		vc='';
+	endif;
+	
+	return vc;
+}
+
+procedure cleanStr(
+// **** remove invalid xml chars
+	vc	 = varchar(2000) not null;
+)=
+declare
+	i	= integer not null;
+	leftVc	= varchar(2000) not null;
+	rightVc	= varchar(2000) not null;
+enddeclare
+{
+	for i = 1 to length(vc) do
+		case charextract(vc,i) of
+			'"' : {
+				leftVc=left(vc,i-1);
+				rightVc=right(vc,length(vc)-i);
+				vc=leftVc + rightVc;
+				i=1;
+			}
+			'&' : {
+				leftVc=left(vc,i-1);
+				rightVc=right(vc,length(vc)-i);
+				vc=leftVc + 'and' + rightVc;
+				i=1;
+			}
+			HC_TAB : {
+				leftVc=left(vc,i-1);
+				rightVc=right(vc,length(vc)-i);
+				vc=leftVc + '    ' + rightVc;
+				i=1;
+			}
+			HC_FORMFEED : {
+				leftVc=left(vc,i-1);
+				rightVc=right(vc,length(vc)-i);
+				vc=leftVc + rightVc;
+				i=1;
+			}
+			HC_NEWLINE : {
+				leftVc=left(vc,i-1);
+				rightVc=right(vc,length(vc)-i);
+				vc=leftVc + rightVc;
+				i=1;
+			}
+			default : {}
+		endcase;
+	endfor;
+
+	return vc;
+}
+
+procedure removeLeftSpace(
+	vc	 = varchar(2000) not null;
+)=
+declare
+	i = integer not null;
+enddeclare
+{
+	i=1;
+	while charextract(vc,i)=' ' do
+		i=i+1;
+		if i>length(vc) then
+			endloop;
+		endif;
+	endwhile;
+	if i>1 then 
+		vc=right(vc,length(vc)-(i-1));
+	endif;
+	return vc;
+}
+
+procedure removeRightSpace(
+	string	 = StringObject;
+)=
+declare
+	i 	= integer not null;
+	ch 	= varchar(1) not null;
+enddeclare
+{
+	i=string.length;
+	while i>0 do			
+		ch=string.subString(startposition=i,length=1);
+		if ch!=' ' and ch!=HC_TAB and ch!=HC_NEWLINE then
+			endloop;
+		endif;
+		i=i-1;			
+	endwhile;
+	string=string.extractString(length=i);
+	return string;
+}]]>
+		</script>
+		<defaultstring>
+			<![CDATA[DSCP]]>
+		</defaultstring>
+		<defaultvalue>3</defaultvalue>
+	</COMPONENT>
+	<COMPONENT name="msxml" xsi:type="extlibsource">
+		<uniqueid>{F5078F18-C551-11D3-89B9-0000F81FE221}</uniqueid>
+		<majorversion>4</majorversion>
+	</COMPONENT>
+	<COMPONENT name="Run" xsi:type="proc4glsource">
+		<versshortremarks>
+			<![CDATA[Starting Component]]>
+		</versshortremarks>
+		<script>
+			<![CDATA[procedure $_Componentname=
+DECLARE
+	i				= INTEGER      NOT NULL;
+	directory		= VARCHAR(256) NOT NULL;
+	subDirectory	= VARCHAR(256) NOT NULL DEFAULT 'files';
+	fileName		= VARCHAR(256) NOT NULL;
+	applicationName = VARCHAR(32)  NOT NULL;
+	dmt				= VARCHAR(4)   NOT NULL DEFAULT '.dmt';
+	CleanXSL		= VARCHAR(256) NOT NULL DEFAULT 'ORDocCleanXML.xsl';
+	HtmlXSL			= VARCHAR(256) NOT NULL DEFAULT 'ORDocConvert2HTML.xsl';
+	HtmlCSS			= VARCHAR(256) NOT NULL DEFAULT 'ORDocStyle.css';
+ENDDECLARE
+{
+	FOR i = 1 TO CurSession.AppFlags.LastRow DO
+		CASE LOWERCASE(CurSession.AppFlags[i].name) OF
+		'directory' : {
+			IF CurSession.AppFlags[i].values.LastRow = 1 THEN
+				directory = CurSession.AppFlags[i].values[1].value;
+			ENDIF;
+		} 
+		'applicationname' : {
+			IF CurSession.AppFlags[i].values.LastRow = 1 THEN
+				applicationName = CurSession.AppFlags[i].values[1].value;
+			ENDIF;
+		} 
+		DEFAULT : {}
+		ENDCASE;
+	ENDFOR;
+	
+	IF directory = '' THEN
+		CurProcedure.trace('Flag: directory is not set');
+		EXIT;
+	ENDIF;
+	
+	IF applicationName = '' THEN
+		CurProcedure.trace('Flag: applicationname is not set');
+		EXIT;
+	ENDIF;
+	
+	IF CurSession.DirectoryExists(directory = directory) = FALSE THEN
+		CurProcedure.trace('ERROR: Directory: ' + directory + ' not found');
+		EXIT;
+	ENDIF;
+
+	subdirectory = directory + dirSeparator() + subdirectory;
+	IF CurSession.DirectoryExists(directory = subDirectory) = FALSE THEN
+		CurProcedure.trace('ERROR: Subdirectory: ' + subDirectory + ' not found');
+		EXIT;
+	ENDIF;
+	
+	filename = directory + dirSeparator()+ ApplicationName + dmt;
+	IF CurSession.FileExists(filename = filename) = FALSE THEN
+		CurProcedure.trace('ERROR: Application file: ' + filename + ' not found');
+		EXIT;
+	ENDIF;
+	
+	filename = subDirectory + dirSeparator()+ CleanXSL;
+	IF CurSession.FileExists(filename = filename) = FALSE THEN
+		CurProcedure.trace('ERROR: XML Clean file: ' + filename + ' not found');
+		EXIT;
+	ENDIF;
+	
+	filename = subDirectory + dirSeparator()+ HTMLXSL;
+	IF CurSession.FileExists(filename = filename) = FALSE THEN
+		CurProcedure.trace('ERROR: XML 2 HTML XSL file: ' + filename + ' not found');
+		EXIT;
+	ENDIF;
+
+	filename = subDirectory + dirSeparator()+ HtmlCSS;
+	IF CurSession.FileExists(filename = filename) = FALSE THEN
+		CurProcedure.trace('Warning: CSS file: ' + filename + ' not found');
+	ENDIF;
+
+	Curprocedure.trace('Create documentation on application: ' + applicationName);
+	Curprocedure.trace('in directory: ' + Directory);
+	callproc dmt2HtmlDoc(Appname = Applicationname, Dochome = Directory, CleanXSL = CleanXSL, HtmlXSL = HtmlXSL);
+}
+]]>
+		</script>
+	</COMPONENT>
+</OPENROAD>
